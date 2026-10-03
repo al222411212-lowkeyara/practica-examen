@@ -1,0 +1,32 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local credentials and app configuration
+.env
+.env.*
+!.env.example
+.logismart_settings.json
+
+# Test and tooling output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Generated exports and logs
+*.log
+*.pdf
+*.csv
+*.jsonl
