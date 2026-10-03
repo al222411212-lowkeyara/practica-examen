@@ -5,7 +5,8 @@ import io
 import json
 import os
 import threading
-from datetime import datetime, timezone
+import tkinter as tk
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Any
@@ -135,6 +136,9 @@ class LogiSmartApp(ctk.CTk):
         self.selected_risk_id: str | None = None
         self.selected_record_id: str | None = None
         self.chat_history: list[dict[str, str]] = []
+        self._dashboard_refreshing = False
+        self._dashboard_trend_rows = []
+        self._dashboard_status_counts = {}
         self._build_header()
         self._build_tabs()
         self._build_statusbar()
@@ -358,144 +362,462 @@ class LogiSmartApp(ctk.CTk):
         page = self._tab_scroll("Resumen")
         self._section_title(
             page,
-            "Vista general",
+            "Centro de control",
             "Operaciones del patio",
-            "Indicadores y actividad consultados desde MongoDB.",
+            "Una vista en tiempo real de la actividad, los accesos y los riesgos.",
         )
-        filters = ctk.CTkFrame(page, fg_color="transparent")
-        filters.pack(fill="x", padx=15, pady=(0, 12))
+        filter_card = self._card(page, "", "")
+        filter_card.pack(fill="x", padx=15, pady=(0, 12))
+        filters = ctk.CTkFrame(filter_card, fg_color="transparent")
+        filters.pack(fill="x", padx=14, pady=12)
+        _crear_etiqueta(filters, "PERIODO", 9, PALETA["suave"], True).pack(
+            side="left", padx=(0, 10)
+        )
         self.date_from = self._entry(filters, "Desde AAAA-MM-DD", width=155)
         self.date_from.pack(side="left", padx=(0, 7))
         self.date_to = self._entry(filters, "Hasta AAAA-MM-DD", width=155)
-        self.date_to.pack(side="left", padx=(0, 7))
-        self._button(filters, "Aplicar fechas", self.refresh_dashboard, primary=True).pack(side="left")
+        self.date_to.pack(side="left", padx=(0, 9))
+        self._button(
+            filters, "7 días", lambda: self._set_dashboard_period(7), width=70
+        ).pack(side="left", padx=(0, 5))
+        self._button(
+            filters, "30 días", lambda: self._set_dashboard_period(30), width=76
+        ).pack(side="left", padx=(0, 5))
+        self._button(
+            filters, "Todo", self._clear_dashboard_period, width=62
+        ).pack(side="left", padx=(0, 9))
+        self.refresh_button = self._button(
+            filters, "Actualizar", self.refresh_dashboard, primary=True, width=112
+        )
+        self.refresh_button.pack(side="right")
+        today = date.today()
+        self.date_from.insert(0, (today - timedelta(days=29)).isoformat())
+        self.date_to.insert(0, today.isoformat())
 
         kpis = ctk.CTkFrame(page, fg_color="transparent")
         kpis.pack(fill="x", padx=15)
-        for col in range(3):
+        for col in range(4):
             kpis.grid_columnconfigure(col, weight=1, uniform="kpi")
         self.kpi_values = []
         for col, (title, color) in enumerate((
             ("Camiones atendidos", PALETA["verde"]),
             ("Incidentes abiertos", PALETA["ambar"]),
             ("Riesgos críticos", PALETA["rojo"]),
+            ("Accesos autorizados", PALETA["azul"]),
         )):
             card = self._card(kpis, "")
-            card.grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 5, 5 if col < 2 else 0))
-            _crear_etiqueta(card, title, 11, PALETA["suave"]).pack(anchor="w", padx=15, pady=(14, 3))
-            value = _crear_etiqueta(card, "—", 29, color, font=ctk.CTkFont(family="Georgia", size=30))
-            value.pack(anchor="w", padx=15)
-            foot = _crear_etiqueta(card, "Esperando datos", 9, PALETA["suave"])
-            foot.pack(anchor="w", padx=15, pady=(1, 13))
+            card.grid(
+                row=0,
+                column=col,
+                sticky="ew",
+                padx=(0 if col == 0 else 5, 5 if col < 3 else 0),
+            )
+            _crear_etiqueta(card, title, 10, PALETA["suave"]).pack(
+                anchor="w", padx=13, pady=(12, 3)
+            )
+            value = _crear_etiqueta(
+                card, "—", 27, color,
+                font=ctk.CTkFont(family="Georgia", size=29),
+            )
+            value.pack(anchor="w", padx=13)
+            foot = _crear_etiqueta(card, "Cargando datos...", 9, PALETA["suave"])
+            foot.pack(anchor="w", padx=13, pady=(1, 11))
             self.kpi_values.append((value, foot))
 
         charts = ctk.CTkFrame(page, fg_color="transparent")
-        charts.pack(fill="both", expand=True, padx=15, pady=(14, 0))
-        charts.grid_columnconfigure((0, 1), weight=1, uniform="dash")
-        self.category_chart = self._card(charts, "Incidentes por categoría y semana", "Agregación semanal de MongoDB")
-        self.category_chart.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        self.category_rows = ctk.CTkFrame(self.category_chart, fg_color="transparent")
-        self.category_rows.pack(fill="both", expand=True, padx=15, pady=12)
-        self.recent_access = self._card(charts, "Últimos accesos", "Bitácora registrada")
-        self.recent_access.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        self.access_rows = ctk.CTkFrame(self.recent_access, fg_color="transparent")
-        self.access_rows.pack(fill="both", expand=True, padx=15, pady=12)
+        charts.pack(fill="both", expand=True, padx=15, pady=(14, 14))
+        charts.grid_columnconfigure(0, weight=3, uniform="dash")
+        charts.grid_columnconfigure(1, weight=2, uniform="dash")
+        charts.grid_rowconfigure(0, weight=1)
+        trend_card = self._card(
+            charts, "Tendencia de incidentes", "Incidentes registrados por semana"
+        )
+        trend_card.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self.trend_canvas = tk.Canvas(
+            trend_card, height=235, bg=PALETA["superficie"], highlightthickness=0
+        )
+        self.trend_canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.trend_canvas.bind("<Configure>", self._draw_trend_chart)
 
-    def _date_filter(self, field):
-        result = {}
+        status_card = self._card(
+            charts, "Estado de incidentes", "Distribución en el periodo"
+        )
+        status_card.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        self.status_canvas = tk.Canvas(
+            status_card, height=235, bg=PALETA["superficie"], highlightthickness=0
+        )
+        self.status_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 12))
+        self.status_canvas.bind("<Configure>", self._draw_status_chart)
+
+        self.recent_access = self._card(
+            charts, "Actividad reciente", "Últimos movimientos de la bitácora de accesos"
+        )
+        self.recent_access.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.access_rows = ctk.CTkFrame(self.recent_access, fg_color="transparent")
+        self.access_rows.pack(fill="both", expand=True, padx=16, pady=10)
+
+    def _set_dashboard_period(self, days):
+        end = date.today()
+        start = end - timedelta(days=days - 1)
+        self.date_from.delete(0, "end")
+        self.date_from.insert(0, start.isoformat())
+        self.date_to.delete(0, "end")
+        self.date_to.insert(0, end.isoformat())
+        self.refresh_dashboard()
+
+    def _clear_dashboard_period(self):
+        self.date_from.delete(0, "end")
+        self.date_to.delete(0, "end")
+        self.refresh_dashboard()
+
+    def _dashboard_date_range(self):
         start_text = self.date_from.get().strip()
         end_text = self.date_to.get().strip()
-        if start_text or end_text:
-            dates = {}
-            if start_text:
-                dates["$gte"] = datetime.fromisoformat(start_text).replace(tzinfo=timezone.utc)
-            if end_text:
-                dates["$lte"] = datetime.fromisoformat(end_text).replace(
-                    hour=23, minute=59, second=59, tzinfo=timezone.utc
-                )
-            result[field] = dates
-        return result
-
-    def refresh_dashboard(self):
         try:
-            db = self._get_db()
-            access_filter = self._date_filter("marca_tiempo")
-            incident_filter = self._date_filter("fecha_creacion")
-            risk_filter = self._date_filter("fecha_creacion")
-            truck_count = len(db.accesos.distinct("camion_id", access_filter))
-            open_incidents = db.incidentes.count_documents({
-                **incident_filter,
-                "estado": {"$in": ["nuevo", "en_atencion"]},
-            })
-            threshold = int(self.settings["umbral_riesgo"])
-            critical_risks = db.riesgos_eticos.count_documents({
-                **risk_filter,
-                "puntaje_despues": {"$gte": threshold}
-            })
-            for (value, foot), number, note in zip(
-                self.kpi_values,
-                (truck_count, open_incidents, critical_risks),
-                ("en el rango seleccionado", "nuevos o en atención", f"residual ≥ {threshold}"),
-            ):
-                value.configure(text=f"{number:02d}")
-                foot.configure(text=note)
-            self._render_category_chart(db)
-            self._render_recent_access(db, access_filter)
-            self.top_connection.configure(text="●  MongoDB conectado", text_color="#B9D9C3")
-            self._set_status("Indicadores actualizados desde MongoDB.")
-        except (ValueError, PyMongoError, ConnectionError) as error:
-            self.top_connection.configure(text="●  MongoDB no disponible", text_color="#F3B4A8")
-            self._set_status(f"No se pudo actualizar el tablero: {error}", "error")
-
-    def _render_category_chart(self, db):
-        for child in self.category_rows.winfo_children():
-            child.destroy()
-        try:
-            rows = incidentes_por_categoria_y_semana(
-                db,
-                desde=self._optional_date(self.date_from.get(), end=False),
-                hasta=self._optional_date(self.date_to.get(), end=True),
-            )
-        except TypeError:
-            rows = incidentes_por_categoria_y_semana(db)
-        if not rows:
-            _crear_etiqueta(self.category_rows, "Sin incidentes para el periodo.", 11, PALETA["suave"]).pack(anchor="w")
-            return
-        max_count = max(item["total"] for item in rows)
-        for item in rows[:8]:
-            row = ctk.CTkFrame(self.category_rows, fg_color="transparent")
-            row.pack(fill="x", pady=5)
-            row.grid_columnconfigure(1, weight=1)
-            _crear_etiqueta(row, f"{item['categoria']} · {item['semana']}", 10, PALETA["tinta"], wraplength=170).grid(row=0, column=0, sticky="w", padx=(0, 8))
-            bar = ctk.CTkProgressBar(row, height=8, corner_radius=8, progress_color=PALETA["verde"], fg_color="#E8EEE9")
-            bar.grid(row=0, column=1, sticky="ew", padx=5)
-            bar.set(item["total"] / max_count)
-            _crear_etiqueta(row, str(item["total"]), 10, PALETA["suave"], True, width=25, anchor="e").grid(row=0, column=2)
+            start = date.fromisoformat(start_text) if start_text else None
+            end = date.fromisoformat(end_text) if end_text else None
+        except ValueError:
+            raise ValueError("Usa el formato AAAA-MM-DD para las fechas.") from None
+        if start and start.isoformat() != start_text:
+            raise ValueError("Usa el formato AAAA-MM-DD para las fechas.")
+        if end and end.isoformat() != end_text:
+            raise ValueError("Usa el formato AAAA-MM-DD para las fechas.")
+        if start is not None and end is not None and start > end:
+            raise ValueError("La fecha inicial no puede ser posterior a la fecha final.")
+        start_datetime = (
+            datetime.combine(start, time.min, tzinfo=timezone.utc)
+            if start is not None
+            else None
+        )
+        end_datetime = (
+            datetime.combine(end, time.min, tzinfo=timezone.utc)
+            if end is not None
+            else None
+        )
+        return start_datetime, end_datetime
 
     @staticmethod
-    def _optional_date(value, end=False):
-        if not value.strip():
-            return None
-        parsed = datetime.fromisoformat(value.strip()).replace(tzinfo=timezone.utc)
-        if end:
-            parsed = parsed.replace(hour=23, minute=59, second=59)
-        return parsed
+    def _date_filter_for_range(field, start, end):
+        dates = {}
+        if start is not None:
+            dates["$gte"] = start
+        if end is not None:
+            dates["$lt"] = end + timedelta(days=1)
+        return {field: dates} if dates else {}
 
-    def _render_recent_access(self, db, filters):
+    def refresh_dashboard(self):
+        if self._dashboard_refreshing:
+            return
+        try:
+            start, end = self._dashboard_date_range()
+        except ValueError as error:
+            self._set_status(f"Filtro de fechas inválido: {error}", "error")
+            return
+        try:
+            threshold = int(self.settings["umbral_riesgo"])
+        except (TypeError, ValueError) as error:
+            self._set_status(f"Umbral de riesgo inválido: {error}", "error")
+            return
+
+        self._dashboard_refreshing = True
+        self.refresh_button.configure(text="Actualizando...", state="disabled")
+        self._set_status("Consultando actividad en MongoDB...", "busy")
+        start_text = self.date_from.get().strip()
+        end_text = self.date_to.get().strip()
+
+        def worker():
+            try:
+                db = self._get_db()
+                access_filter = self._date_filter_for_range("marca_tiempo", start, end)
+                incident_filter = self._date_filter_for_range("fecha_creacion", start, end)
+                risk_filter = self._date_filter_for_range("fecha_creacion", start, end)
+                truck_count = len(db.accesos.distinct("camion_id", access_filter))
+                open_incidents = db.incidentes.count_documents({
+                    **incident_filter,
+                    "estado": {"$in": ["nuevo", "en_atencion"]},
+                })
+                critical_risks = db.riesgos_eticos.count_documents({
+                    **risk_filter,
+                    "puntaje_despues": {"$gte": threshold},
+                })
+                total_accesses = db.accesos.count_documents(access_filter)
+                authorized_accesses = db.accesos.count_documents({
+                    **access_filter, "resultado_A": True
+                })
+                status_counts = {
+                    status: db.incidentes.count_documents({
+                        **incident_filter, "estado": status
+                    })
+                    for status in ESTADOS
+                }
+                trend_rows = incidentes_por_categoria_y_semana(
+                    db,
+                    desde=start,
+                    hasta=(
+                        end + timedelta(days=1) - timedelta(microseconds=1)
+                        if end
+                        else None
+                    ),
+                )
+                recent_access = list(
+                    db.accesos.find(
+                        access_filter,
+                        {
+                            "camion_id": 1,
+                            "resultado_A": 1,
+                            "marca_tiempo": 1,
+                            "operador": 1,
+                        },
+                    )
+                    .sort("marca_tiempo", -1)
+                    .limit(6)
+                )
+                result = {
+                    "truck_count": truck_count,
+                    "open_incidents": open_incidents,
+                    "critical_risks": critical_risks,
+                    "total_accesses": total_accesses,
+                    "authorized_accesses": authorized_accesses,
+                    "status_counts": status_counts,
+                    "trend_rows": trend_rows,
+                    "recent_access": recent_access,
+                    "threshold": threshold,
+                    "start_text": start_text,
+                    "end_text": end_text,
+                }
+                self.after(0, lambda: self._dashboard_refresh_done(result))
+            except (PyMongoError, ConnectionError, ValueError, TypeError) as error:
+                self.after(
+                    0,
+                    lambda message=str(error): self._dashboard_refresh_failed(message),
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _dashboard_refresh_done(self, result):
+        self._dashboard_refreshing = False
+        self.refresh_button.configure(text="Actualizar", state="normal")
+        period = self._period_label(result["start_text"], result["end_text"])
+        values = (
+            (result["truck_count"], period),
+            (result["open_incidents"], "nuevos o en atención"),
+            (result["critical_risks"], f"puntaje residual ≥ {result['threshold']}"),
+            (
+                f"{result['authorized_accesses'] * 100 / result['total_accesses']:.0f}%"
+                if result["total_accesses"]
+                else "0%",
+                f"{result['authorized_accesses']} de {result['total_accesses']} evaluados",
+            ),
+        )
+        for (value_label, foot_label), (value, note) in zip(self.kpi_values, values):
+            value_label.configure(
+                text=f"{value:02d}" if isinstance(value, int) else value
+            )
+            foot_label.configure(text=note)
+        self._dashboard_trend_rows = result["trend_rows"]
+        self._dashboard_status_counts = result["status_counts"]
+        self._draw_trend_chart()
+        self._draw_status_chart()
+        self._render_recent_access(result["recent_access"])
+        self.top_connection.configure(
+            text="●  MongoDB conectado", text_color="#B9D9C3"
+        )
+        self._set_status(f"Tablero actualizado · {period}")
+
+    def _dashboard_refresh_failed(self, message):
+        self._dashboard_refreshing = False
+        self.refresh_button.configure(text="Actualizar", state="normal")
+        self.top_connection.configure(
+            text="●  MongoDB no disponible", text_color="#F3B4A8"
+        )
+        self._set_status(f"No se pudo actualizar el tablero: {message}", "error")
+
+    @staticmethod
+    def _period_label(start_text, end_text):
+        if start_text and end_text:
+            return f"{start_text} — {end_text}"
+        if start_text:
+            return f"Desde {start_text}"
+        if end_text:
+            return f"Hasta {end_text}"
+        return "Todo el periodo"
+
+    def _draw_trend_chart(self, _event=None):
+        canvas = self.trend_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 300)
+        height = max(canvas.winfo_height(), 170)
+        totals = {}
+        for item in self._dashboard_trend_rows:
+            week = item.get("semana")
+            if week:
+                totals[week] = totals.get(week, 0) + item["total"]
+        weeks = sorted(totals)[-10:]
+        if not weeks:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="Sin incidentes en este periodo",
+                fill=PALETA["suave"],
+                font=("Segoe UI", 11),
+            )
+            return
+
+        left, right, top, bottom = 42, width - 18, 20, height - 34
+        max_value = max(totals[week] for week in weeks)
+        scale_max = max(4, max_value)
+        for tick in range(5):
+            value = scale_max * tick / 4
+            y = bottom - (bottom - top) * tick / 4
+            canvas.create_line(left, y, right, y, fill=PALETA["linea"])
+            canvas.create_text(
+                left - 9,
+                y,
+                text=f"{value:.0f}",
+                anchor="e",
+                fill=PALETA["suave"],
+                font=("Segoe UI", 8),
+            )
+        step = (right - left) / max(len(weeks) - 1, 1)
+        points = []
+        for index, week in enumerate(weeks):
+            x = left + index * step if len(weeks) > 1 else (left + right) / 2
+            y = bottom - totals[week] / scale_max * (bottom - top)
+            points.extend((x, y))
+            canvas.create_text(
+                x, bottom + 17, text=week[-3:],
+                fill=PALETA["suave"], font=("Segoe UI", 8),
+            )
+        if len(weeks) > 1:
+            canvas.create_line(
+                *points,
+                fill=PALETA["verde"],
+                width=3,
+                smooth=True,
+                splinesteps=18,
+            )
+        for index, week in enumerate(weeks):
+            x = left + index * step if len(weeks) > 1 else (left + right) / 2
+            y = bottom - totals[week] / scale_max * (bottom - top)
+            canvas.create_oval(
+                x - 4, y - 4, x + 4, y + 4,
+                fill=PALETA["superficie"],
+                outline=PALETA["verde"],
+                width=2,
+            )
+
+    def _draw_status_chart(self, _event=None):
+        canvas = self.status_canvas
+        canvas.delete("all")
+        width = max(canvas.winfo_width(), 260)
+        height = max(canvas.winfo_height(), 170)
+        statuses = (
+            ("nuevo", "Nuevos", PALETA["azul"]),
+            ("en_atencion", "En atención", PALETA["ambar"]),
+            ("cerrado", "Cerrados", PALETA["verde"]),
+        )
+        total = sum(self._dashboard_status_counts.get(key, 0) for key, _, _ in statuses)
+        cx, cy = width * 0.31, height * 0.48
+        radius = min(height * 0.31, width * 0.25)
+        canvas.create_oval(
+            cx - radius, cy - radius, cx + radius, cy + radius,
+            fill="#EDF1EE", outline="#EDF1EE",
+        )
+        if total:
+            angle = -90
+            for key, _, color in statuses:
+                count = self._dashboard_status_counts.get(key, 0)
+                if not count:
+                    continue
+                extent = count * 360 / total
+                canvas.create_arc(
+                    cx - radius, cy - radius, cx + radius, cy + radius,
+                    start=angle,
+                    extent=extent,
+                    style="pieslice",
+                    fill=color,
+                    outline=PALETA["superficie"],
+                    width=2,
+                )
+                angle += extent
+        hole = radius * 0.62
+        canvas.create_oval(
+            cx - hole, cy - hole, cx + hole, cy + hole,
+            fill=PALETA["superficie"], outline=PALETA["superficie"],
+        )
+        canvas.create_text(
+            cx, cy - 5, text=str(total), fill=PALETA["tinta"],
+            font=("Georgia", 20, "bold"),
+        )
+        canvas.create_text(
+            cx, cy + 17, text="incidentes", fill=PALETA["suave"],
+            font=("Segoe UI", 8),
+        )
+        legend_x = cx + radius + 17
+        for index, (key, label, color) in enumerate(statuses):
+            y = cy - 30 + index * 28
+            count = self._dashboard_status_counts.get(key, 0)
+            canvas.create_oval(
+                legend_x, y - 5, legend_x + 10, y + 5,
+                fill=color, outline=color,
+            )
+            canvas.create_text(
+                legend_x + 16,
+                y,
+                text=f"{label}  {count}",
+                anchor="w",
+                fill=PALETA["tinta"],
+                font=("Segoe UI", 9),
+            )
+
+    def _render_recent_access(self, records):
         for child in self.access_rows.winfo_children():
             child.destroy()
-        records = list(db.accesos.find(filters).sort("marca_tiempo", -1).limit(6))
         if not records:
-            _crear_etiqueta(self.access_rows, "Aún no hay accesos en la bitácora.", 11, PALETA["suave"]).pack(anchor="w")
+            _crear_etiqueta(
+                self.access_rows,
+                "Aún no hay accesos registrados para este periodo.",
+                11,
+                PALETA["suave"],
+            ).pack(anchor="w", pady=7)
             return
         for record in records:
             allowed = bool(record.get("resultado_A"))
             icon_color = PALETA["verde"] if allowed else PALETA["rojo"]
             line = ctk.CTkFrame(self.access_rows, fg_color="transparent")
             line.pack(fill="x", pady=5)
-            _crear_etiqueta(line, "●", 11, icon_color, True).pack(side="left", padx=(0, 8))
-            _crear_etiqueta(line, record.get("camion_id", "Camión sin ID"), 11, PALETA["tinta"], True).pack(side="left")
-            _crear_etiqueta(line, "AUTORIZADO" if allowed else "REVISAR", 9, icon_color, True).pack(side="right")
+            _crear_etiqueta(line, "●", 11, icon_color, True).pack(
+                side="left", padx=(0, 8)
+            )
+            _crear_etiqueta(
+                line, record.get("camion_id", "Camión sin ID"),
+                11, PALETA["tinta"], True,
+            ).pack(side="left")
+            operator = record.get("operador", "")
+            if operator:
+                _crear_etiqueta(
+                    line, f"· {operator}", 10, PALETA["suave"]
+                ).pack(side="left", padx=(8, 0))
+            timestamp = record.get("marca_tiempo")
+            time_label = (
+                (
+                    timestamp.replace(tzinfo=timezone.utc)
+                    if timestamp.tzinfo is None
+                    else timestamp
+                ).astimezone().strftime("%d %b · %H:%M")
+                if isinstance(timestamp, datetime)
+                else "Fecha no disponible"
+            )
+            _crear_etiqueta(
+                line, time_label, 9, PALETA["suave"]
+            ).pack(side="right", padx=(8, 0))
+            _crear_etiqueta(
+                line,
+                "AUTORIZADO" if allowed else "REVISAR",
+                9,
+                icon_color,
+                True,
+            ).pack(side="right", padx=(8, 0))
 
     def _build_access_tab(self):
         page = self._tab_scroll("Control de acceso")

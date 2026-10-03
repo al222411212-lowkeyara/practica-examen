@@ -59,7 +59,7 @@ Eliminar exclusivamente los datos de demostración de LogiSmart:
 - `services/classifier.py`: clasificación JSON con Pydantic, Ollama, reintento, respaldo por reglas y fusión conservadora.
 - `services/assistant.py`: búsqueda en MongoDB antes de invocar Ollama y devolución de referencias de origen.
 - `services/evaluation.py`: conjunto de 30 correos y métricas reproducibles.
-- `logismart_app.py`: GUI de escritorio por módulos.
+- `logismart_app.py`: GUI de escritorio por módulos, con tablero de indicadores, filtros por periodo, gráficas de tendencia y estado de incidentes, y actividad reciente.
 
 La evaluación es preliminar: el conjunto de 30 ejemplos tiene etiquetas de referencia preparadas para el ejercicio; revísenlas manualmente y documenten cambios antes de presentarlas como ground truth.
 
