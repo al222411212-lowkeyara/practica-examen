@@ -47,8 +47,7 @@ COLORES = {
 # ------------------------------------------------------------
 # CONFIGURACION DEL SISTEMA
 # ------------------------------------------------------------
-# Se utiliza un ejemplo diferente al del codigo original:
-# ahora el asistente se especializa en soporte tecnico de redes y sistemas.
+# El asistente se especializa en cine y recomendaciones cinematograficas.
 # ------------------------------------------------------------
 
 mensaje_sistema = """
